@@ -1,0 +1,257 @@
+{
+  "id": "boreal_passage_v1",
+  "name": "The Boreal Passage \u2014 Standard",
+  "description": "Two nations clash across the Boreal Passage strait. Control air assets to defend your homeland.",
+  "theater_width_km": 1667,
+  "theater_height_km": 1300,
+  "tick_minutes": 5,
+  "max_ticks": 1000,
+  "detection_range_km": 200,
+  "engagement_range_km": 50,
+  "bases": {
+    "north": [
+      {
+        "id": "northern_vanguard",
+        "name": "Northern Vanguard Base",
+        "position": [
+          198.3,
+          335.0
+        ],
+        "max_aircraft_capacity": 12,
+        "fuel_storage": 5000,
+        "fuel_resupply_rate": 100
+      },
+      {
+        "id": "highridge_command",
+        "name": "Highridge Command",
+        "position": [
+          838.3,
+          75.0
+        ],
+        "max_aircraft_capacity": 15,
+        "fuel_storage": 8000,
+        "fuel_resupply_rate": 150
+      },
+      {
+        "id": "boreal_watch_post",
+        "name": "Boreal Watch Post",
+        "position": [
+          1158.3,
+          385.0
+        ],
+        "max_aircraft_capacity": 6,
+        "fuel_storage": 2000,
+        "fuel_resupply_rate": 50
+      }
+    ],
+    "south": [
+      {
+        "id": "firewatch_station",
+        "name": "Firewatch Station",
+        "position": [
+          1398.3,
+          1071.7
+        ],
+        "max_aircraft_capacity": 12,
+        "fuel_storage": 5000,
+        "fuel_resupply_rate": 100
+      },
+      {
+        "id": "southern_redoubt",
+        "name": "Southern Redoubt",
+        "position": [
+          321.7,
+          1238.3
+        ],
+        "max_aircraft_capacity": 15,
+        "fuel_storage": 8000,
+        "fuel_resupply_rate": 150
+      },
+      {
+        "id": "spear_point_base",
+        "name": "Spear Point Base",
+        "position": [
+          918.3,
+          835.0
+        ],
+        "max_aircraft_capacity": 8,
+        "fuel_storage": 3000,
+        "fuel_resupply_rate": 75
+      }
+    ]
+  },
+  "cities": {
+    "north": [
+      {
+        "id": "arktholm",
+        "name": "Arktholm (Capital X)",
+        "position": [
+          418.3,
+          95.0
+        ],
+        "population": 500000,
+        "is_capital": true,
+        "defense_value": 1.0
+      },
+      {
+        "id": "valbrek",
+        "name": "Valbrek",
+        "position": [
+          1423.3,
+          213.3
+        ],
+        "population": 120000,
+        "is_capital": false,
+        "defense_value": 0.5
+      },
+      {
+        "id": "nordvik",
+        "name": "Nordvik",
+        "position": [
+          140.0,
+          323.3
+        ],
+        "population": 150000,
+        "is_capital": false,
+        "defense_value": 0.5
+      }
+    ],
+    "south": [
+      {
+        "id": "meridia",
+        "name": "Meridia (Capital Y)",
+        "position": [
+          1225.0,
+          1208.3
+        ],
+        "population": 450000,
+        "is_capital": true,
+        "defense_value": 1.0
+      },
+      {
+        "id": "callhaven",
+        "name": "Callhaven",
+        "position": [
+          96.7,
+          1150.0
+        ],
+        "population": 100000,
+        "is_capital": false,
+        "defense_value": 0.5
+      },
+      {
+        "id": "solano",
+        "name": "Solano",
+        "position": [
+          576.7,
+          1236.7
+        ],
+        "population": 130000,
+        "is_capital": false,
+        "defense_value": 0.5
+      }
+    ]
+  },
+  "starting_aircraft": {
+    "north": [
+      {
+        "type": "combat_plane",
+        "count": 6,
+        "base": "northern_vanguard"
+      },
+      {
+        "type": "combat_plane",
+        "count": 4,
+        "base": "highridge_command"
+      },
+      {
+        "type": "uav",
+        "count": 4,
+        "base": "boreal_watch_post"
+      },
+      {
+        "type": "drone_swarm",
+        "count": 6,
+        "base": "highridge_command"
+      },
+      {
+        "type": "bomber",
+        "count": 3,
+        "base": "northern_vanguard"
+      },
+      {
+        "type": "uav",
+        "count": 3,
+        "base": "northern_vanguard"
+      },
+      {
+        "type": "drone_swarm",
+        "count": 4,
+        "base": "boreal_watch_post"
+      }
+    ],
+    "south": [
+      {
+        "type": "combat_plane",
+        "count": 5,
+        "base": "firewatch_station"
+      },
+      {
+        "type": "combat_plane",
+        "count": 5,
+        "base": "southern_redoubt"
+      },
+      {
+        "type": "uav",
+        "count": 4,
+        "base": "spear_point_base"
+      },
+      {
+        "type": "drone_swarm",
+        "count": 8,
+        "base": "southern_redoubt"
+      },
+      {
+        "type": "bomber",
+        "count": 4,
+        "base": "firewatch_station"
+      },
+      {
+        "type": "uav",
+        "count": 2,
+        "base": "firewatch_station"
+      },
+      {
+        "type": "drone_swarm",
+        "count": 4,
+        "base": "spear_point_base"
+      }
+    ]
+  },
+  "combat_matchups": {
+    "drone_swarm": {
+      "drone_swarm": 0.5,
+      "uav": 0.55,
+      "combat_plane": 0.2,
+      "bomber": 0.65
+    },
+    "uav": {
+      "drone_swarm": 0.45,
+      "uav": 0.5,
+      "combat_plane": 0.25,
+      "bomber": 0.6
+    },
+    "combat_plane": {
+      "drone_swarm": 0.8,
+      "uav": 0.75,
+      "combat_plane": 0.5,
+      "bomber": 0.7
+    },
+    "bomber": {
+      "drone_swarm": 0.35,
+      "uav": 0.4,
+      "combat_plane": 0.3,
+      "bomber": 0.5
+    }
+  }
+}
