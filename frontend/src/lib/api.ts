@@ -1,5 +1,6 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
+// ====== Types ======
 export interface SimulationMetrics {
   total_civilian_casualties: number;
   time_to_first_casualty: number | null;
@@ -25,76 +26,53 @@ export interface SimulationResponse {
   metrics: SimulationMetrics | null;
 }
 
-export interface BatchResponse {
-  batch_id: string;
-  total_simulations: number;
-  status: string;
+export interface Strategy { id: string; name: string; description: string; }
+export interface Scenario { id: string; name: string; theater_width_km: number; theater_height_km: number; }
+
+export interface AttackTarget {
+  type: string;
+  id?: string | null;
+  x_km?: number | null;
+  y_km?: number | null;
 }
 
-export interface StrategyAgg {
-  strategy_id: string;
-  simulations: number;
-  wins: number;
-  losses: number;
-  timeouts: number;
-  win_rate: number;
-  avg_civilian_casualties: number;
-  avg_aircraft_lost: number;
-  avg_engagement_win_rate: number;
-  capital_survival_rate: number;
+export interface AttackAction {
+  tick: number;
+  type: string;
+  aircraft_type: string;
+  count: number;
+  from_base?: string | null;
+  target?: AttackTarget | null;
 }
 
-export interface BatchResults {
-  batch_id: string;
-  status: string;
-  total: number;
-  by_strategy: StrategyAgg[];
-  best_strategy: string | null;
-}
-
-export interface Strategy {
+export interface AttackPlan {
   id: string;
   name: string;
+  source: string;
   description: string;
+  created_at: string;
+  tags: string[];
+  actions: AttackAction[];
 }
 
-export interface Scenario {
-  id: string;
-  name: string;
-  theater_width_km: number;
-  theater_height_km: number;
+export interface AttackPlanSummary {
+  total: number;
+  by_source: Record<string, number>;
 }
 
 export interface TickData {
   tick: number;
   aircraft: Array<{
-    id: string;
-    type: string;
-    side: string;
-    position: [number, number];
-    state: string;
-    fuel: number;
-    ammo: number;
+    id: string; type: string; side: string;
+    position: [number, number]; state: string; fuel: number; ammo: number;
   }>;
   bases: Array<{
-    id: string;
-    name: string;
-    side: string;
-    position: [number, number];
-    operational: boolean;
-    fuel_storage: number;
-    aircraft_count: number;
-    capacity: number;
+    id: string; name: string; side: string; position: [number, number];
+    operational: boolean; fuel_storage: number; aircraft_count: number; capacity: number;
   }>;
   cities: Array<{
-    id: string;
-    name: string;
-    side: string;
-    position: [number, number];
-    damage: number;
-    casualties: number;
-    is_capital?: boolean;
-    population?: number;
+    id: string; name: string; side: string; position: [number, number];
+    damage: number; casualties: number; is_capital?: boolean; population?: number;
   }>;
   battles: Array<Record<string, unknown>>;
   decisions: Array<Record<string, unknown>>;
@@ -102,75 +80,127 @@ export interface TickData {
 }
 
 export interface ReplayData {
-  simulation_id: string;
-  scenario: string;
-  strategy: string;
-  enemy_strategy: string;
-  seed: number;
-  side: string;
-  outcome: string;
-  total_ticks: number;
-  tick_minutes: number;
+  simulation_id: string; scenario: string; strategy: string; enemy_strategy: string;
+  seed: number; side: string; outcome: string;
+  total_ticks: number; tick_minutes: number;
   ticks: TickData[];
   metrics: SimulationMetrics | null;
 }
 
+export interface EvaluateResponse {
+  simulation_id: string;
+  outcome: string;
+  total_ticks: number;
+  attack_plan: AttackPlan;
+  metrics: SimulationMetrics | null;
+}
+
+export interface TrainingPlanResult {
+  attack_plan_id: string;
+  simulations: number;
+  wins: number;
+  losses: number;
+  timeouts: number;
+  defense_success_rate: number;
+  avg_casualties: number;
+  avg_aircraft_lost: number;
+}
+
+export interface TrainingResponse {
+  batch_id: string;
+  total_simulations: number;
+  total_wins: number;
+  overall_defense_rate: number;
+  by_attack_plan: TrainingPlanResult[];
+}
+
+// ====== Fetch wrapper ======
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${body || res.statusText}`);
   }
   return res.json();
 }
 
-export async function getStrategies(): Promise<{ strategies: Strategy[] }> {
-  return fetchAPI("/strategies");
-}
+// ====== Scenarios & Strategies ======
+export const getStrategies = () => fetchAPI<{ strategies: Strategy[] }>("/strategies");
+export const getScenarios = () => fetchAPI<{ scenarios: Scenario[] }>("/scenarios");
 
-export async function getScenarios(): Promise<{ scenarios: Scenario[] }> {
-  return fetchAPI("/scenarios");
-}
+// ====== Attack Plans ======
+export const listAttackPlans = (source?: string) =>
+  fetchAPI<{ plans: AttackPlan[]; total: number }>(
+    source ? `/attack-plans?source=${source}` : "/attack-plans");
 
-export async function runSimulation(params: {
-  scenario_id: string;
-  strategy_id: string;
-  enemy_strategy_id: string;
-  side: string;
-  seed: number;
-}): Promise<SimulationResponse> {
-  return fetchAPI("/simulations", {
+export const getAttackPlanSummary = () => fetchAPI<AttackPlanSummary>("/attack-plans/summary");
+
+export const getAttackPlan = (id: string) => fetchAPI<AttackPlan>(`/attack-plans/${id}`);
+
+export const createCustomPlan = (params: {
+  name: string;
+  description?: string;
+  tags?: string[];
+  actions: AttackAction[];
+}) => fetchAPI<AttackPlan>("/attack-plans", {
+  method: "POST",
+  body: JSON.stringify(params),
+});
+
+export const generateRandomPlans = (count: number, base_seed: number = 1) =>
+  fetchAPI<{ generated: number; plans: AttackPlan[] }>("/attack-plans/generate-random", {
     method: "POST",
-    body: JSON.stringify(params),
+    body: JSON.stringify({ count, base_seed }),
   });
-}
 
-export async function runBatch(params: {
-  scenario_id: string;
-  side: string;
-  runs: Array<{
-    strategy_id: string;
-    enemy_strategy_id: string;
-    seed_start: number;
-    seed_count: number;
-  }>;
-}): Promise<BatchResponse> {
-  return fetchAPI("/simulations/batch", {
+export const generateAIPlan = (prompt: string) =>
+  fetchAPI<AttackPlan>("/attack-plans/generate-ai", {
     method: "POST",
-    body: JSON.stringify(params),
+    body: JSON.stringify({ prompt }),
   });
-}
 
-export async function getSimulation(id: string): Promise<SimulationResponse> {
-  return fetchAPI(`/simulations/${id}`);
-}
+export const deleteAttackPlan = (id: string) =>
+  fetchAPI<{ deleted: boolean }>(`/attack-plans/${id}`, { method: "DELETE" });
 
-export async function getReplay(id: string): Promise<ReplayData> {
-  return fetchAPI(`/simulations/${id}/replay`);
-}
+// ====== Evaluate / Training ======
+export const evaluateAttackPlan = (params: {
+  attack_plan_id: string;
+  strategy_id?: string;
+  scenario_id?: string;
+  side?: string;
+  seed?: number;
+}) => fetchAPI<EvaluateResponse>("/training/evaluate", {
+  method: "POST",
+  body: JSON.stringify({
+    strategy_id: "defensive_v1",
+    scenario_id: "boreal_passage_v1",
+    side: "north",
+    seed: 42,
+    ...params,
+  }),
+});
 
-export async function getBatchResults(batchId: string): Promise<BatchResults> {
-  return fetchAPI(`/batches/${batchId}/results`);
-}
+export const runTraining = (params: {
+  attack_plan_ids: string[];
+  strategy_id?: string;
+  scenario_id?: string;
+  side?: string;
+  seeds_per_plan?: number;
+  seed_start?: number;
+}) => fetchAPI<TrainingResponse>("/training/run", {
+  method: "POST",
+  body: JSON.stringify({
+    strategy_id: "defensive_v1",
+    scenario_id: "boreal_passage_v1",
+    side: "north",
+    seeds_per_plan: 5,
+    seed_start: 1,
+    ...params,
+  }),
+});
+
+// ====== Simulation replay ======
+export const getReplay = (id: string) => fetchAPI<ReplayData>(`/simulations/${id}/replay`);

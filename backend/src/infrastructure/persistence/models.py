@@ -18,3 +18,15 @@ class SimulationResultModel(DBBase):
     total_ticks = Column(Integer, nullable=False)
     event_log_json = Column(Text, nullable=False)
     metrics_json = Column(Text, nullable=True)
+
+
+class AttackPlanModel(DBBase):
+    __tablename__ = "attack_plans"
+
+    plan_id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    source = Column(String, nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(String, nullable=True)
+    tags_json = Column(Text, nullable=True)
+    plan_json = Column(Text, nullable=False)

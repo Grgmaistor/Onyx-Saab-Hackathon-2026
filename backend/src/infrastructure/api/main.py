@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.infrastructure.persistence.database import init_db
-from src.infrastructure.api.routes import simulations, scenarios, batches, results, strategies
+from src.infrastructure.api.routes import simulations, scenarios, batches, results, strategies, attack_plans, training
 
 
 def create_app() -> FastAPI:
@@ -23,6 +23,8 @@ def create_app() -> FastAPI:
     app.include_router(batches.router, prefix="/api/v1")
     app.include_router(results.router, prefix="/api/v1")
     app.include_router(strategies.router, prefix="/api/v1")
+    app.include_router(attack_plans.router, prefix="/api/v1")
+    app.include_router(training.router, prefix="/api/v1")
 
     @app.on_event("startup")
     def startup():
