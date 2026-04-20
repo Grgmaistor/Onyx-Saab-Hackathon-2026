@@ -1,71 +1,222 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Header } from "@/components/mil/Header";
 import { Panel, MetricRow } from "@/components/mil/Panel";
 import {
-  listAttackPlans, runTraining, getStrategies,
-  type AttackPlan, type TrainingResponse, type Strategy,
+  deleteAttackPlan,
+  generateAIAttack,
+  generateRandomAttack,
+  getTrainingJob,
+  listAttackPlans,
+  listPlaybooks,
+  listTrainingJobs,
+  startTraining,
+  type AttackPlan,
+  type DefensePlaybook,
+  type TrainingJob,
 } from "@/lib/api";
+import { invalidate } from "@/lib/cache";
+
+type AttackGroup = {
+  key: string;                // group identifier (tag-derived)
+  label: string;              // human-readable name
+  source: string;             // "random" | "ai_generated" | "custom"
+  plans: AttackPlan[];
+  createdAt: string;
+};
+
+function groupKeyOf(plan: AttackPlan): string {
+  // Prefer an explicit "batch:*" tag; fall back to source + date bucket
+  const batchTag = plan.tags.find((t) => t.startsWith("batch:"));
+  if (batchTag) return batchTag;
+  // Fallback: date-hour bucket by creation timestamp
+  const bucket = plan.created_at.substring(0, 13); // "2026-04-20T14"
+  return `${plan.source}:${bucket}`;
+}
+
+function groupLabel(key: string, plans: AttackPlan[]): string {
+  if (key.startsWith("batch:")) return key.substring(6).replace(/-/g, " ");
+  const [src, bucket] = key.split(":");
+  const count = plans.length;
+  const srcLabel = src === "ai_generated" ? "AI" : src === "random" ? "Random" : "Custom";
+  const date = bucket?.replace("T", " ") ?? "";
+  return `${srcLabel} batch — ${date}:00 (${count})`;
+}
 
 export default function TrainingPage() {
   const [plans, setPlans] = useState<AttackPlan[]>([]);
-  const [strategies, setStrategies] = useState<Strategy[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [strategyId, setStrategyId] = useState("defensive_v1");
-  const [seedsPerPlan, setSeedsPerPlan] = useState(5);
-  const [filter, setFilter] = useState<string>("all");
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<TrainingResponse | null>(null);
+  const [playbooks, setPlaybooks] = useState<DefensePlaybook[]>([]);
+  const [jobs, setJobs] = useState<TrainingJob[]>([]);
+  const [selectedPlans, setSelectedPlans] = useState<Set<string>>(new Set());
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [playbookId, setPlaybookId] = useState<string>("");
+  const [extraPrompt, setExtraPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    listAttackPlans().then((d) => setPlans(d.plans)).catch((e) => setError(String(e)));
-    getStrategies().then((d) => setStrategies(d.strategies)).catch(() => {});
-  }, []);
+  // Attack generation form state
+  const [genMode, setGenMode] = useState<"random" | "ai">("random");
+  const [randomCount, setRandomCount] = useState(8);
+  const [randomSeed, setRandomSeed] = useState(() => Date.now() % 10000);
+  const [aiPrompt, setAiPrompt] = useState(
+    "Generate a multi-wave bomber attack on Arktholm with drone swarms as feint on Nordvik.",
+  );
+  const [generating, setGenerating] = useState(false);
 
-  const filteredPlans = filter === "all" ? plans : plans.filter((p) => p.source === filter);
+  // Active job state
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [activeJob, setActiveJob] = useState<TrainingJob | null>(null);
+  const [starting, setStarting] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const toggleAll = () => {
-    if (selected.size === filteredPlans.length) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(filteredPlans.map((p) => p.id)));
+  const refresh = async () => {
+    try {
+      const [p, pb, j] = await Promise.all([
+        listAttackPlans(),
+        listPlaybooks(),
+        listTrainingJobs(),
+      ]);
+      setPlans(p.plans);
+      setPlaybooks(pb.playbooks);
+      setJobs(j.jobs);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
-  const toggleOne = (id: string) => {
-    const next = new Set(selected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelected(next);
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  // Poll active job
+  useEffect(() => {
+    if (!activeJobId) return;
+    const tick = async () => {
+      try {
+        const job = await getTrainingJob(activeJobId);
+        setActiveJob(job);
+        if (job.status === "completed" || job.status === "failed") {
+          if (pollRef.current) clearInterval(pollRef.current);
+          invalidate("kb");            // KB data changed — bust cache
+          refresh();
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    };
+    tick();
+    pollRef.current = setInterval(tick, 2000);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [activeJobId]);
+
+  // Group plans by batch
+  const groups: AttackGroup[] = useMemo(() => {
+    const map = new Map<string, AttackPlan[]>();
+    for (const p of plans) {
+      const key = groupKeyOf(p);
+      const arr = map.get(key) ?? [];
+      arr.push(p);
+      map.set(key, arr);
+    }
+    return Array.from(map.entries())
+      .map(([key, arr]) => ({
+        key,
+        label: groupLabel(key, arr),
+        source: arr[0].source,
+        plans: arr.sort((a, b) => a.created_at.localeCompare(b.created_at)),
+        createdAt: arr
+          .map((p) => p.created_at)
+          .sort()
+          .reverse()[0] ?? "",
+      }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [plans]);
+
+  const toggleGroup = (group: AttackGroup) => {
+    setSelectedGroup(group.key);
+    setSelectedPlans(new Set(group.plans.map((p) => p.plan_id)));
   };
 
-  const handleRun = async () => {
-    if (selected.size === 0) return;
-    setLoading(true);
+  const togglePlan = (id: string) => {
+    const next = new Set(selectedPlans);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedPlans(next);
+    setSelectedGroup(null);
+  };
+
+  const selectAll = () => {
+    setSelectedPlans(new Set(plans.map((p) => p.plan_id)));
+    setSelectedGroup(null);
+  };
+  const clearSelection = () => {
+    setSelectedPlans(new Set());
+    setSelectedGroup(null);
+  };
+
+  const onGenerate = async () => {
+    setGenerating(true);
     setError(null);
     try {
-      const res = await runTraining({
-        attack_plan_ids: Array.from(selected),
-        strategy_id: strategyId,
-        seeds_per_plan: seedsPerPlan,
-      });
-      setResult(res);
+      if (genMode === "random") {
+        const res = await generateRandomAttack(randomCount, randomSeed);
+        await refresh();
+        // Auto-select the just-generated group
+        const newIds = new Set(res.plans.map((p) => p.plan_id));
+        setSelectedPlans(newIds);
+        setRandomSeed((s) => s + randomCount + 1);
+      } else {
+        const res = await generateAIAttack(aiPrompt);
+        await refresh();
+        setSelectedPlans(new Set([res.plan_id]));
+      }
     } catch (e) {
       setError(String(e));
     } finally {
-      setLoading(false);
+      setGenerating(false);
+    }
+  };
+
+  const onStartTraining = async () => {
+    if (selectedPlans.size === 0) return;
+    setStarting(true);
+    setError(null);
+    try {
+      const res = await startTraining({
+        attack_plan_ids: Array.from(selectedPlans),
+        defense_playbook_id: playbookId || null,
+        extra_playbook_prompt: extraPrompt,
+      });
+      setActiveJobId(res.job_id);
+      setActiveJob(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const onDeletePlan = async (id: string) => {
+    if (!confirm("Delete this attack plan?")) return;
+    try {
+      await deleteAttackPlan(id);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
     }
   };
 
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
-      <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
+      <main className="flex-1 p-6 max-w-[1800px] mx-auto w-full">
         <div className="mb-6">
-          <h1 className="mil-heading text-2xl mb-1">⚡ TRAINING MODE</h1>
-          <p className="text-dim text-sm tracking-wider">MULTI-THREAT STRESS TEST // BATCH ANALYSIS</p>
+          <h1 className="mil-heading text-2xl mb-1">⚡ TRAIN</h1>
+          <p className="text-dim text-sm tracking-wider">
+            GENERATE ATTACK SETS → RUN TRAINING → DOCTRINE GROWS
+          </p>
         </div>
 
         {error && (
@@ -74,180 +225,320 @@ export default function TrainingPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-[320px_1fr] gap-4">
-          {/* LEFT - Config */}
+        <div className="grid grid-cols-[380px_1fr] gap-4">
+          {/* LEFT COLUMN: Generate + Start */}
           <div className="space-y-4">
-            <Panel title="TRAINING CONFIG">
+            <Panel title="① GENERATE ATTACKS" badge={genMode.toUpperCase()}>
+              <div className="flex gap-1 mb-3">
+                <button
+                  onClick={() => setGenMode("random")}
+                  className={`mil-btn mil-btn-sm flex-1 ${genMode === "random" ? "mil-btn-primary" : ""}`}
+                >
+                  RANDOM
+                </button>
+                <button
+                  onClick={() => setGenMode("ai")}
+                  className={`mil-btn mil-btn-sm flex-1 ${genMode === "ai" ? "mil-btn-primary" : ""}`}
+                >
+                  AI
+                </button>
+              </div>
+
+              {genMode === "random" ? (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-dim">
+                    Create a deterministic batch of varied attack plans respecting resource limits.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <div className="mil-label mb-1">Count</div>
+                      <input
+                        type="number"
+                        value={randomCount}
+                        onChange={(e) => setRandomCount(Number(e.target.value))}
+                        min={1}
+                        max={50}
+                        className="mil-input"
+                      />
+                    </div>
+                    <div>
+                      <div className="mil-label mb-1">Seed</div>
+                      <input
+                        type="number"
+                        value={randomSeed}
+                        onChange={(e) => setRandomSeed(Number(e.target.value))}
+                        className="mil-input"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-dim">
+                    Describe the attack shape you want. The LLM produces one plan.
+                  </p>
+                  <textarea
+                    value={aiPrompt}
+                    onChange={(e) => setAiPrompt(e.target.value)}
+                    className="mil-textarea"
+                    rows={5}
+                  />
+                  <p className="text-[10px] text-warn">Requires ANTHROPIC_API_KEY.</p>
+                </div>
+              )}
+
+              <button
+                onClick={onGenerate}
+                disabled={generating}
+                className="mil-btn mil-btn-primary w-full mt-3"
+              >
+                {generating
+                  ? "◌ GENERATING..."
+                  : genMode === "random"
+                  ? `⚙ GENERATE ${randomCount} PLANS`
+                  : "◈ GENERATE VIA CLAUDE"}
+              </button>
+            </Panel>
+
+            <Panel title="② START TRAINING" badge={`${selectedPlans.size} SELECTED`}>
               <div className="space-y-3">
                 <div>
-                  <div className="mil-label mb-1">Defense Strategy</div>
-                  <select value={strategyId} onChange={(e) => setStrategyId(e.target.value)} className="mil-select">
-                    {strategies.map((s) => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
+                  <div className="mil-label mb-1">Defense Playbook</div>
+                  <select
+                    value={playbookId}
+                    onChange={(e) => setPlaybookId(e.target.value)}
+                    className="mil-select"
+                  >
+                    <option value="">[ NEW — generated via AI from doctrine ]</option>
+                    {playbooks.map((p) => (
+                      <option key={p.playbook_id} value={p.playbook_id}>
+                        {p.name}
+                      </option>
                     ))}
                   </select>
                 </div>
-
-                <div>
-                  <div className="mil-label mb-1">Seeds per Plan</div>
-                  <input
-                    type="number" value={seedsPerPlan}
-                    onChange={(e) => setSeedsPerPlan(Number(e.target.value))}
-                    min={1} max={50} className="mil-input"
-                  />
-                  <p className="text-[10px] text-dim mt-1">
-                    Each plan runs {seedsPerPlan}× with different seeds for statistical confidence.
-                  </p>
-                </div>
-
-                <hr className="mil-divider" />
-
-                <div className="text-xs">
-                  <div className="flex justify-between mb-1">
-                    <span className="mil-metric-label">Plans Selected</span>
-                    <span className="mil-value-accent">{selected.size}</span>
+                {!playbookId && (
+                  <div>
+                    <div className="mil-label mb-1">Extra guidance (optional)</div>
+                    <textarea
+                      value={extraPrompt}
+                      onChange={(e) => setExtraPrompt(e.target.value)}
+                      className="mil-textarea"
+                      rows={2}
+                      placeholder="e.g., 'prioritize bomber interception'"
+                    />
                   </div>
-                  <div className="flex justify-between">
-                    <span className="mil-metric-label">Total Simulations</span>
-                    <span className="mil-value-accent">{selected.size * seedsPerPlan}</span>
-                  </div>
-                </div>
-
+                )}
                 <button
-                  onClick={handleRun}
-                  disabled={loading || selected.size === 0}
+                  onClick={onStartTraining}
+                  disabled={starting || selectedPlans.size === 0}
                   className="mil-btn mil-btn-primary w-full"
                 >
-                  {loading ? "◌ RUNNING BATCH..." : "⚡ INITIATE TRAINING"}
+                  {starting ? "◌ STARTING..." : `⚡ TRAIN ON ${selectedPlans.size} PLANS`}
                 </button>
+                <p className="text-[10px] text-dim">
+                  Runs one simulation per selected attack against the playbook, analyzes each,
+                  then synthesizes doctrine updates.
+                </p>
               </div>
             </Panel>
 
-            {result && (
-              <Panel title="TRAINING RESULT" badge={result.batch_id}>
-                <div className="mb-3">
-                  <div className="text-3xl mil-value-accent font-bold">
-                    {(result.overall_defense_rate * 100).toFixed(1)}%
+            {activeJob && (
+              <Panel title="CURRENT JOB" badge={activeJob.status.toUpperCase()}>
+                <div className="space-y-2">
+                  <div className="font-mono text-[10px] text-dim">{activeJob.job_id}</div>
+                  <div className="text-xs">
+                    {activeJob.progress_current} / {activeJob.progress_total} simulations
                   </div>
-                  <div className="text-dim text-xs tracking-wider">OVERALL DEFENSE RATE</div>
+                  <div className="h-1.5 bg-surface-1 overflow-hidden">
+                    <div
+                      className="h-full transition-all"
+                      style={{
+                        width: `${
+                          (activeJob.progress_current / Math.max(activeJob.progress_total, 1)) * 100
+                        }%`,
+                        background: "var(--accent)",
+                      }}
+                    />
+                  </div>
+                  {activeJob.result_summary && (
+                    <>
+                      <hr className="mil-divider" />
+                      <MetricRow label="Matches" value={activeJob.result_summary.total_matches ?? 0} />
+                      <MetricRow label="Wins" value={activeJob.result_summary.wins ?? 0} />
+                      <MetricRow label="Losses" value={activeJob.result_summary.losses ?? 0} />
+                      <MetricRow label="Timeouts" value={activeJob.result_summary.timeouts ?? 0} />
+                      <MetricRow
+                        label="Avg Fitness"
+                        value={activeJob.result_summary.avg_fitness?.toFixed(1) ?? "—"}
+                      />
+                      <MetricRow
+                        label="Doctrine Updates"
+                        value={
+                          (activeJob.result_summary.doctrine_updates?.additions ?? 0) +
+                          (activeJob.result_summary.doctrine_updates?.reinforcements ?? 0) +
+                          (activeJob.result_summary.doctrine_updates?.supersessions ?? 0)
+                        }
+                      />
+                    </>
+                  )}
+                  {activeJob.error && <div className="text-xs text-danger">{activeJob.error}</div>}
                 </div>
-                <MetricRow label="Total Simulations" value={result.total_simulations} />
-                <MetricRow label="Total Wins" value={result.total_wins} />
-                <MetricRow label="Plans Tested" value={result.by_attack_plan.length} />
               </Panel>
             )}
           </div>
 
-          {/* RIGHT - Plan selector / results */}
+          {/* RIGHT COLUMN: Attack library + job history */}
           <div className="space-y-4">
-            <Panel title="ATTACK PLAN SELECTION"
+            <Panel
+              title={`ATTACK SETS (${groups.length} groups · ${plans.length} plans)`}
               actions={
-                <span className="flex gap-2">
-                  <button onClick={() => setFilter("all")}
-                    className={`mil-btn mil-btn-sm ${filter === "all" ? "mil-btn-primary" : ""}`}>
-                    ALL ({plans.length})
+                <span className="flex gap-1">
+                  <button onClick={selectAll} className="mil-btn mil-btn-sm">
+                    SELECT ALL
                   </button>
-                  <button onClick={() => setFilter("random")}
-                    className={`mil-btn mil-btn-sm ${filter === "random" ? "mil-btn-primary" : ""}`}>
-                    RANDOM
-                  </button>
-                  <button onClick={() => setFilter("ai_generated")}
-                    className={`mil-btn mil-btn-sm ${filter === "ai_generated" ? "mil-btn-primary" : ""}`}>
-                    AI
-                  </button>
-                  <button onClick={() => setFilter("custom")}
-                    className={`mil-btn mil-btn-sm ${filter === "custom" ? "mil-btn-primary" : ""}`}>
-                    CUSTOM
+                  <button onClick={clearSelection} className="mil-btn mil-btn-sm">
+                    CLEAR
                   </button>
                 </span>
               }
             >
-              <div className="max-h-[400px] overflow-y-auto">
+              <div className="max-h-[480px] overflow-y-auto space-y-2">
+                {groups.length === 0 ? (
+                  <p className="text-dim text-xs p-3">
+                    [ no attack plans yet — use the generator on the left ]
+                  </p>
+                ) : (
+                  groups.map((g) => {
+                    const allSelected = g.plans.every((p) => selectedPlans.has(p.plan_id));
+                    const someSelected =
+                      g.plans.some((p) => selectedPlans.has(p.plan_id)) && !allSelected;
+                    return (
+                      <div key={g.key} className="mil-panel">
+                        <div
+                          className="flex items-center justify-between p-2 cursor-pointer hover:bg-surface-1"
+                          onClick={() => toggleGroup(g)}
+                          style={{
+                            background: selectedGroup === g.key ? "var(--surface-2)" : undefined,
+                          }}
+                        >
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              ref={(el) => {
+                                if (el) el.indeterminate = someSelected;
+                              }}
+                              readOnly
+                              className="accent-green-400"
+                            />
+                            <div>
+                              <div className="mil-value text-xs">{g.label}</div>
+                              <div className="text-[10px] text-dim">
+                                {g.plans.length} plans · {g.source}
+                              </div>
+                            </div>
+                          </div>
+                          <span className="mil-badge mil-badge-dim">
+                            {g.source.substring(0, 3).toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="border-t border-mil">
+                          {g.plans.map((p) => (
+                            <div
+                              key={p.plan_id}
+                              className="flex items-center gap-2 px-3 py-1 text-[11px] hover:bg-surface-1 cursor-pointer"
+                              onClick={() => togglePlan(p.plan_id)}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedPlans.has(p.plan_id)}
+                                readOnly
+                                className="accent-green-400"
+                              />
+                              <div className="flex-1">
+                                <div className="mil-value">{p.name}</div>
+                                <div className="text-[10px] text-dim font-mono">
+                                  {p.actions.length} actions · {p.pattern_id?.substring(0, 12)}
+                                </div>
+                              </div>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onDeletePlan(p.plan_id);
+                                }}
+                                className="mil-btn mil-btn-sm mil-btn-danger"
+                              >
+                                DEL
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </Panel>
+
+            <Panel title={`JOB HISTORY (${jobs.length})`}>
+              <div className="max-h-[260px] overflow-y-auto">
                 <table className="mil-table">
                   <thead>
                     <tr>
-                      <th style={{ width: 40 }}>
-                        <input type="checkbox"
-                          checked={filteredPlans.length > 0 && selected.size === filteredPlans.length}
-                          onChange={toggleAll}
-                          className="accent-green-400"
-                        />
-                      </th>
-                      <th>NAME</th>
-                      <th style={{ width: 90 }}>SOURCE</th>
-                      <th style={{ width: 70 }}>ACTIONS</th>
-                      <th>TAGS</th>
+                      <th>JOB</th>
+                      <th>STATUS</th>
+                      <th>PROGRESS</th>
+                      <th>STARTED</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredPlans.map((p) => (
-                      <tr key={p.id} onClick={() => toggleOne(p.id)} style={{ cursor: "pointer" }}>
+                    {jobs.map((j) => (
+                      <tr key={j.job_id}>
+                        <td className="font-mono text-[10px]">{j.job_id}</td>
                         <td>
-                          <input type="checkbox" checked={selected.has(p.id)} onChange={() => {}} className="accent-green-400" />
-                        </td>
-                        <td>
-                          <div className="mil-value text-xs">{p.name}</div>
-                          <div className="text-[10px] text-dim">{p.description.substring(0, 60)}</div>
-                        </td>
-                        <td>
-                          <span className={`mil-badge ${
-                            p.source === "random" ? "mil-badge-dim" :
-                            p.source === "ai_generated" ? "mil-badge-running" :
-                            "mil-badge-win"
-                          }`}>
-                            {p.source.substring(0, 4).toUpperCase()}
+                          <span
+                            className={`mil-badge ${
+                              j.status === "completed"
+                                ? "mil-badge-win"
+                                : j.status === "failed"
+                                ? "mil-badge-loss"
+                                : j.status === "running"
+                                ? "mil-badge-running"
+                                : "mil-badge-dim"
+                            }`}
+                          >
+                            {j.status.toUpperCase()}
                           </span>
                         </td>
-                        <td className="font-mono">{p.actions.length}</td>
+                        <td className="font-mono">
+                          {j.progress_current}/{j.progress_total}
+                        </td>
+                        <td className="text-[10px] text-dim">
+                          {j.started_at?.substring(11, 19)}
+                        </td>
                         <td>
-                          <div className="flex gap-1 flex-wrap">
-                            {p.tags.slice(0, 2).map((t, i) => (
-                              <span key={i} className="text-[9px] text-dim">{t}</span>
-                            ))}
-                          </div>
+                          <button
+                            onClick={() => setActiveJobId(j.job_id)}
+                            className="mil-btn mil-btn-sm"
+                          >
+                            VIEW
+                          </button>
                         </td>
                       </tr>
                     ))}
-                    {filteredPlans.length === 0 && (
-                      <tr><td colSpan={5} className="text-center text-dim py-6">[ NO PLANS MATCHING FILTER ]</td></tr>
+                    {jobs.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="text-center text-dim py-4">
+                          [ no jobs yet ]
+                        </td>
+                      </tr>
                     )}
                   </tbody>
                 </table>
               </div>
             </Panel>
-
-            {result && (
-              <Panel title="PER-PLAN RESULTS">
-                <table className="mil-table">
-                  <thead>
-                    <tr>
-                      <th>PLAN ID</th>
-                      <th>SIMS</th>
-                      <th>WINS</th>
-                      <th>LOSSES</th>
-                      <th>TIMEOUTS</th>
-                      <th>SUCCESS</th>
-                      <th>AVG CAS</th>
-                      <th>AVG LOST</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.by_attack_plan.map((r) => (
-                      <tr key={r.attack_plan_id}>
-                        <td className="font-mono text-[10px]">{r.attack_plan_id}</td>
-                        <td>{r.simulations}</td>
-                        <td className="text-accent">{r.wins}</td>
-                        <td className="text-danger">{r.losses}</td>
-                        <td className="text-warn">{r.timeouts}</td>
-                        <td className="mil-value-accent">{(r.defense_success_rate * 100).toFixed(0)}%</td>
-                        <td>{r.avg_casualties.toFixed(0)}</td>
-                        <td>{r.avg_aircraft_lost.toFixed(1)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </Panel>
-            )}
           </div>
         </div>
       </main>

@@ -1,210 +1,319 @@
 "use client";
 
-import { useRef, useEffect, useCallback } from "react";
-import type { ReplayData, TickData } from "@/lib/api";
+import { useRef, useEffect, useCallback, useMemo } from "react";
+import type { Replay, ReplayTick } from "@/lib/api";
 
 const THEATER_W = 1667;
 const THEATER_H = 1300;
 
+type Aircraft = {
+  id: string;
+  type: string;
+  side: string;
+  position: [number, number];
+  state: string;
+  fuel: number;
+  ammo: number;
+  damage_level?: string;
+};
+
+type Location = {
+  id: string;
+  name: string;
+  side: string;
+  position: [number, number];
+  archetype: string;
+  is_destroyed?: boolean;
+  is_launch_disabled?: boolean;
+  casualties?: number;
+};
+
 const sx = (x: number, w: number) => (x / THEATER_W) * w;
 const sy = (y: number, h: number) => (y / THEATER_H) * h;
 
-export function TacticalMap({ replay, currentTick }: { replay: ReplayData | null; currentTick: number }) {
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t;
+}
+
+export function TacticalMap({
+  replay,
+  tickFloat,
+}: {
+  replay: Replay | null;
+  tickFloat: number;   // fractional tick for smooth interpolation
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const draw = useCallback((ctx: CanvasRenderingContext2D, tick: TickData | null, w: number, h: number) => {
-    // Sea background
-    ctx.fillStyle = "#05100a";
-    ctx.fillRect(0, 0, w, h);
-
-    // Grid
-    ctx.strokeStyle = "rgba(74, 222, 128, 0.04)";
-    ctx.lineWidth = 0.5;
-    for (let x = 0; x < w; x += 40) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-    }
-    for (let y = 0; y < h; y += 40) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-    }
-
-    // Major grid lines
-    ctx.strokeStyle = "rgba(74, 222, 128, 0.1)";
-    for (let x = 0; x < w; x += 200) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-    }
-    for (let y = 0; y < h; y += 200) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-    }
-
-    // Crosshair center
-    ctx.strokeStyle = "rgba(74, 222, 128, 0.2)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(w / 2 - 10, h / 2); ctx.lineTo(w / 2 + 10, h / 2);
-    ctx.moveTo(w / 2, h / 2 - 10); ctx.lineTo(w / 2, h / 2 + 10);
-    ctx.stroke();
-
-    // North landmass
-    ctx.fillStyle = "rgba(34, 80, 50, 0.25)";
-    ctx.strokeStyle = "rgba(74, 222, 128, 0.4)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(w, 0);
-    ctx.lineTo(w, sy(300, h));
-    ctx.quadraticCurveTo(w * 0.6, sy(380, h), w * 0.3, sy(330, h));
-    ctx.quadraticCurveTo(w * 0.1, sy(360, h), 0, sy(350, h));
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    // South landmass
-    ctx.fillStyle = "rgba(60, 40, 25, 0.25)";
-    ctx.strokeStyle = "rgba(200, 130, 70, 0.4)";
-    ctx.beginPath();
-    ctx.moveTo(0, h);
-    ctx.lineTo(w, h);
-    ctx.lineTo(w, sy(1050, h));
-    ctx.quadraticCurveTo(w * 0.5, sy(1010, h), w * 0.2, sy(1060, h));
-    ctx.quadraticCurveTo(w * 0.05, sy(1080, h), 0, sy(1065, h));
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    // Passage label
-    ctx.fillStyle = "rgba(74, 222, 128, 0.12)";
-    ctx.font = "bold 18px monospace";
-    ctx.textAlign = "center";
-    ctx.letterSpacing = "4px";
-    ctx.fillText("THE BOREAL PASSAGE", w / 2, h * 0.55);
-
-    if (!tick) {
-      ctx.fillStyle = "rgba(74, 222, 128, 0.4)";
-      ctx.font = "11px monospace";
-      ctx.fillText("[ NO REPLAY DATA ]", w / 2, h / 2 + 60);
-      ctx.fillStyle = "rgba(74, 222, 128, 0.2)";
-      ctx.font = "9px monospace";
-      ctx.fillText("AWAITING SIMULATION", w / 2, h / 2 + 75);
-      return;
-    }
-
-    // Bases — triangles
-    for (const base of tick.bases) {
-      const bx = sx(base.position[0], w);
-      const by = sy(base.position[1], h);
-      const isNorth = base.side === "north";
-      const color = isNorth ? "#4ade80" : "#fb923c";
-
-      if (!base.operational) {
-        ctx.fillStyle = "rgba(100, 100, 100, 0.4)";
-      } else {
-        ctx.fillStyle = color;
+  // Build an aircraft-position index by id → [tick, position] pairs for fast lookup
+  const aircraftTimeline = useMemo(() => {
+    if (!replay) return new Map<string, Array<{ tick: number; pos: [number, number]; state: string; type: string; side: string; fuel: number; damage_level: string }>>();
+    const map = new Map<string, Array<{ tick: number; pos: [number, number]; state: string; type: string; side: string; fuel: number; damage_level: string }>>();
+    replay.ticks.forEach((t, i) => {
+      for (const a of (t.aircraft as unknown as Aircraft[])) {
+        let arr = map.get(a.id);
+        if (!arr) {
+          arr = [];
+          map.set(a.id, arr);
+        }
+        arr.push({
+          tick: i,
+          pos: a.position,
+          state: a.state,
+          type: a.type,
+          side: a.side,
+          fuel: a.fuel,
+          damage_level: a.damage_level ?? "none",
+        });
       }
-      ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+    });
+    return map;
+  }, [replay]);
+
+  const draw = useCallback(
+    (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+      // ===== Background =====
+      ctx.fillStyle = "#05100a";
+      ctx.fillRect(0, 0, w, h);
+
+      // Grid
+      ctx.strokeStyle = "rgba(74, 222, 128, 0.04)";
+      ctx.lineWidth = 0.5;
+      for (let x = 0; x < w; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+      for (let y = 0; y < h; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+
+      // Landmasses
+      ctx.fillStyle = "rgba(34, 80, 50, 0.25)";
+      ctx.strokeStyle = "rgba(74, 222, 128, 0.3)";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(bx, by - 9);
-      ctx.lineTo(bx - 8, by + 6);
-      ctx.lineTo(bx + 8, by + 6);
+      ctx.moveTo(0, 0);
+      ctx.lineTo(w, 0);
+      ctx.lineTo(w, sy(300, h));
+      ctx.quadraticCurveTo(w * 0.5, sy(380, h), 0, sy(350, h));
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
 
-      // Base label
-      ctx.fillStyle = "rgba(184, 230, 198, 0.5)";
-      ctx.font = "8px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText(base.name.toUpperCase().split(" ")[0], bx, by + 18);
-    }
-
-    // Cities — squares
-    for (const city of tick.cities) {
-      const cx = sx(city.position[0], w);
-      const cy = sy(city.position[1], h);
-      const isCapital = city.name.includes("Capital") || city.name.includes("Arktholm") || city.name.includes("Meridia");
-      const size = isCapital ? 10 : 7;
-
-      let color = isCapital ? "#fbbf24" : "#b8e6c6";
-      if (city.damage > 0.3) color = "#f59e0b";
-      if (city.damage > 0.7) color = "#ef4444";
-
-      ctx.fillStyle = color;
-      ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
-      ctx.fillRect(cx - size / 2, cy - size / 2, size, size);
-      ctx.strokeRect(cx - size / 2, cy - size / 2, size, size);
-
-      if (isCapital) {
-        ctx.strokeStyle = color;
-        ctx.beginPath();
-        ctx.arc(cx, cy, size + 3, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-
-      ctx.fillStyle = "rgba(184, 230, 198, 0.6)";
-      ctx.font = isCapital ? "bold 9px monospace" : "8px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText(
-        city.name.replace(" (Capital X)", "").replace(" (Capital Y)", "").toUpperCase(),
-        cx, cy + size / 2 + 10,
-      );
-    }
-
-    // Aircraft
-    for (const ac of tick.aircraft) {
-      if (["destroyed", "grounded", "refueling", "rearming", "maintenance"].includes(ac.state)) continue;
-      const ax = sx(ac.position[0], w);
-      const ay = sy(ac.position[1], h);
-      const color = ac.side === "north" ? "#4ade80" : "#fb923c";
-
-      ctx.fillStyle = color;
+      ctx.fillStyle = "rgba(60, 40, 25, 0.25)";
+      ctx.strokeStyle = "rgba(200, 130, 70, 0.3)";
       ctx.beginPath();
-      ctx.arc(ax, ay, 3, 0, Math.PI * 2);
+      ctx.moveTo(0, h);
+      ctx.lineTo(w, h);
+      ctx.lineTo(w, sy(1050, h));
+      ctx.quadraticCurveTo(w * 0.5, sy(1010, h), 0, sy(1060, h));
+      ctx.closePath();
       ctx.fill();
+      ctx.stroke();
 
-      // Direction indicator for bombers
-      if (ac.type === "bomber") {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(ax, ay, 5, 0, Math.PI * 2);
-        ctx.stroke();
+      ctx.fillStyle = "rgba(74, 222, 128, 0.08)";
+      ctx.font = "bold 16px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("BOREAL PASSAGE", w / 2, h * 0.56);
+
+      if (!replay) {
+        ctx.fillStyle = "rgba(74, 222, 128, 0.3)";
+        ctx.font = "10px monospace";
+        ctx.fillText("[ NO REPLAY ]", w / 2, h / 2 + 50);
+        return;
       }
 
-      if (ac.fuel < 0.3) {
-        ctx.strokeStyle = "#ef4444";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(ax, ay, 6, 0, Math.PI * 2);
-        ctx.stroke();
+      // Clamp tick
+      const maxTick = replay.ticks.length - 1;
+      const clampedTickFloat = Math.max(0, Math.min(maxTick, tickFloat));
+      const intTick = Math.floor(clampedTickFloat);
+      const subTick = clampedTickFloat - intTick;
+      const tickA: ReplayTick = replay.ticks[intTick];
+      const tickB: ReplayTick | undefined = replay.ticks[Math.min(maxTick, intTick + 1)];
+
+      // ===== Locations (static per tick — use tickA) =====
+      for (const loc of (tickA.locations as unknown as Location[])) {
+        const [x, y] = loc.position;
+        const lx = sx(x, w);
+        const ly = sy(y, h);
+        const isNorth = loc.side === "north";
+        const color = isNorth ? "#4ade80" : "#fb923c";
+        const archetype = loc.archetype;
+
+        if (archetype === "air_base" || archetype === "forward_base") {
+          ctx.fillStyle = loc.is_destroyed ? "#666" : color;
+          ctx.beginPath();
+          ctx.moveTo(lx, ly - 10);
+          ctx.lineTo(lx - 9, ly + 7);
+          ctx.lineTo(lx + 9, ly + 7);
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          if (loc.is_launch_disabled && !loc.is_destroyed) {
+            ctx.strokeStyle = "#ef4444";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(lx, ly, 14, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        } else {
+          const isCapital = archetype === "capital";
+          const size = isCapital ? 11 : 8;
+          let fill: string = isCapital ? "#fbbf24" : "#b8e6c6";
+          if (loc.is_destroyed) fill = "#ef4444";
+          ctx.fillStyle = fill;
+          ctx.strokeStyle = "#000";
+          ctx.fillRect(lx - size / 2, ly - size / 2, size, size);
+          ctx.strokeRect(lx - size / 2, ly - size / 2, size, size);
+          if (isCapital) {
+            ctx.strokeStyle = fill;
+            ctx.beginPath();
+            ctx.arc(lx, ly, size + 4, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+
+        ctx.fillStyle = "rgba(184, 230, 198, 0.55)";
+        ctx.font = archetype === "capital" ? "bold 9px monospace" : "8px monospace";
+        ctx.textAlign = "center";
+        const label = loc.name.replace(" (Capital X)", "").replace(" (Capital Y)", "");
+        ctx.fillText(label.toUpperCase(), lx, ly + 20);
       }
-    }
 
-    // Battles — flash indicator
-    for (const battle of (tick.battles || [])) {
-      const pos = battle.position as [number, number];
-      if (!pos) continue;
-      const bx = sx(pos[0], w);
-      const by = sy(pos[1], h);
-      ctx.strokeStyle = "#fbbf24";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(bx, by, 10, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.strokeStyle = "rgba(251, 191, 36, 0.4)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(bx, by, 16, 0, Math.PI * 2);
-      ctx.stroke();
-    }
+      // ===== Aircraft (interpolated) =====
+      const airborneStates = new Set(["airborne", "damaged", "engaged"]);
+      const acById = new Map<string, Aircraft>();
+      for (const a of (tickA.aircraft as unknown as Aircraft[])) {
+        acById.set(a.id, a);
+      }
+      const acByIdB = new Map<string, Aircraft>();
+      if (tickB) {
+        for (const a of (tickB.aircraft as unknown as Aircraft[])) {
+          acByIdB.set(a.id, a);
+        }
+      }
 
-    // HUD corner info
-    ctx.fillStyle = "rgba(74, 222, 128, 0.6)";
-    ctx.font = "9px monospace";
-    ctx.textAlign = "left";
-    ctx.fillText(`T+${String(tick.tick).padStart(4, "0")}`, 8, 14);
-    ctx.textAlign = "right";
-    ctx.fillText(`UNITS: ${tick.aircraft.filter(a => a.state !== "destroyed").length}`, w - 8, 14);
-  }, []);
+      for (const [id, a] of acById) {
+        const b = acByIdB.get(id);
+        const wasAirborne = airborneStates.has(a.state);
+        const willBeAirborne = b ? airborneStates.has(b.state) : wasAirborne;
+        const wasDestroyed = a.state === "destroyed";
+        const willBeDestroyed = b && b.state === "destroyed";
+
+        if (wasDestroyed && !willBeDestroyed) continue;
+        if (!wasAirborne && !willBeAirborne) continue;
+
+        // Interpolated position
+        const [ax, ay] = a.position;
+        const [bx, by] = b ? b.position : a.position;
+        const px = lerp(ax, bx, subTick);
+        const py = lerp(ay, by, subTick);
+
+        const cx = sx(px, w);
+        const cy = sy(py, h);
+        const color = a.side === "north" ? "#22d3ee" : "#fb923c";
+
+        // Alpha for fade in/out
+        let alpha = 1.0;
+        if (!wasAirborne && willBeAirborne) alpha = subTick;
+        else if (wasAirborne && !willBeAirborne) {
+          alpha = 1 - subTick;
+          if (willBeDestroyed) {
+            // Explosion marker fading in at destination
+            ctx.fillStyle = `rgba(251, 191, 36, ${subTick})`;
+            ctx.beginPath();
+            ctx.arc(sx(bx, w), sy(by, h), 8 * (0.5 + 0.5 * subTick), 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        ctx.globalAlpha = Math.max(0.15, alpha);
+
+        // Heading indicator (line pointing to target direction)
+        const dx = bx - ax;
+        const dy = by - ay;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > 0.1) {
+          const ndx = dx / dist;
+          const ndy = dy / dist;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + ndx * 8, cy + ndy * 8);
+          ctx.stroke();
+        }
+
+        // Aircraft dot
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Ring for bomber
+        if (a.type === "bomber") {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        // Low fuel warning
+        if (a.fuel < 0.3) {
+          ctx.strokeStyle = "#ef4444";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        // Damaged indicator
+        if (a.damage_level && a.damage_level !== "none") {
+          ctx.strokeStyle = "#fbbf24";
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
+      ctx.globalAlpha = 1.0;
+
+      // ===== Engagement markers (this tick) =====
+      const events = tickA.events as unknown as Array<{ type: string; position_km?: [number, number] }>;
+      for (const ev of events) {
+        if (ev.type === "engagement" && ev.position_km) {
+          const bx = sx(ev.position_km[0], w);
+          const by = sy(ev.position_km[1], h);
+          ctx.strokeStyle = "#fbbf24";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(bx, by, 12, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
+      // ===== HUD =====
+      ctx.fillStyle = "rgba(74, 222, 128, 0.7)";
+      ctx.font = "10px monospace";
+      ctx.textAlign = "left";
+      ctx.fillText(`T+${String(intTick).padStart(4, "0")}`, 8, 16);
+      ctx.textAlign = "right";
+      const airborneCount = (tickA.aircraft as unknown as Aircraft[]).filter(
+        (a) => airborneStates.has(a.state),
+      ).length;
+      ctx.fillText(`AIRBORNE: ${airborneCount}`, w - 8, 16);
+    },
+    [replay, tickFloat],
+  );
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -215,16 +324,22 @@ export function TacticalMap({ replay, currentTick }: { replay: ReplayData | null
     const rect = canvas.parentElement?.getBoundingClientRect();
     const w = rect?.width || 800;
     const h = (w / THEATER_W) * THEATER_H;
-    canvas.width = w;
-    canvas.height = h;
-
-    const tick = replay?.ticks?.[currentTick] || null;
-    draw(ctx, tick, w, h);
-  }, [replay, currentTick, draw]);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    draw(ctx, w, h);
+    // silence aircraftTimeline unused warning by touching it
+    void aircraftTimeline;
+  }, [draw, aircraftTimeline]);
 
   return (
     <div className="relative">
-      <canvas ref={canvasRef} className="block w-full" style={{ aspectRatio: `${THEATER_W}/${THEATER_H}` }} />
+      <canvas
+        ref={canvasRef}
+        className="block w-full"
+        style={{ aspectRatio: `${THEATER_W}/${THEATER_H}` }}
+      />
     </div>
   );
 }

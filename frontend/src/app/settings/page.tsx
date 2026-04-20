@@ -1,0 +1,174 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Header } from "@/components/mil/Header";
+import { Panel, MetricRow } from "@/components/mil/Panel";
+import {
+  activateSettings,
+  createSettingsFromScenario,
+  deleteSettings,
+  getActiveSettings,
+  listSettings,
+  type Settings,
+  type SettingsDetail,
+} from "@/lib/api";
+
+export default function SettingsPage() {
+  const [settings, setSettings] = useState<Settings[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [active, setActive] = useState<SettingsDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [newName, setNewName] = useState("Boreal Passage — Custom");
+
+  const refresh = async () => {
+    try {
+      const [list, act] = await Promise.all([
+        listSettings(),
+        getActiveSettings().catch(() => null),
+      ]);
+      setSettings(list.settings);
+      setActiveId(list.active_id);
+      setActive(act);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const handleCreate = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await createSettingsFromScenario({ name: newName });
+      await refresh();
+    } catch (e) { setError(String(e)); } finally { setLoading(false); }
+  };
+
+  const handleActivate = async (id: string) => {
+    setError(null);
+    try {
+      await activateSettings(id);
+      await refresh();
+    } catch (e) { setError(String(e)); }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm("Delete these settings? (Associated match results will remain but orphaned.)")) return;
+    try {
+      await deleteSettings(id);
+      await refresh();
+    } catch (e) { setError(String(e)); }
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Header />
+      <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
+        <div className="mb-6">
+          <h1 className="mil-heading text-2xl mb-1">⚙ SETTINGS</h1>
+          <p className="text-dim text-sm tracking-wider">SCENARIO CONFIG // TRAINING SCOPE</p>
+        </div>
+
+        {error && (
+          <div className="mil-panel mb-4 p-3 border-red-900/50">
+            <span className="text-danger text-xs">⚠ {error}</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-[1fr_380px] gap-4">
+          <Panel title={`STORED SETTINGS (${settings.length})`} badge={activeId ? "ACTIVE SET" : "NONE ACTIVE"}>
+            <table className="mil-table">
+              <thead>
+                <tr>
+                  <th>NAME</th>
+                  <th>ID</th>
+                  <th>TICK MIN</th>
+                  <th>MAX TICKS</th>
+                  <th>CREATED</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {settings.map((s) => (
+                  <tr key={s.settings_id}
+                      style={{ background: s.settings_id === activeId ? "var(--surface-2)" : undefined }}>
+                    <td className="mil-value">{s.name}</td>
+                    <td className="font-mono text-[10px] text-dim">{s.settings_id.substring(0, 16)}…</td>
+                    <td className="font-mono">{s.tick_minutes}</td>
+                    <td className="font-mono">{s.max_ticks}</td>
+                    <td className="text-[10px] text-dim">{s.created_at?.substring(0, 10)}</td>
+                    <td>
+                      <div className="flex gap-1">
+                        {s.settings_id !== activeId && (
+                          <button onClick={() => handleActivate(s.settings_id)}
+                                  className="mil-btn mil-btn-sm">ACTIVATE</button>
+                        )}
+                        <button onClick={() => handleDelete(s.settings_id)}
+                                className="mil-btn mil-btn-sm mil-btn-danger">DEL</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {settings.length === 0 && (
+                  <tr><td colSpan={6} className="text-center text-dim py-6">[ NO SETTINGS ]</td></tr>
+                )}
+              </tbody>
+            </table>
+
+            <hr className="mil-divider" />
+
+            <div className="flex items-center gap-2">
+              <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
+                     className="mil-input flex-1" placeholder="Name for new settings" />
+              <button onClick={handleCreate} disabled={loading}
+                      className="mil-btn mil-btn-primary">
+                {loading ? "◌ LOADING" : "+ FROM SCENARIO"}
+              </button>
+            </div>
+            <p className="text-[10px] text-dim mt-2">
+              Loads scenario/boreal_passage.json. Content-addressable: same config reuses ID.
+            </p>
+          </Panel>
+
+          <Panel title="ACTIVE DETAILS">
+            {active ? (
+              <div className="space-y-3">
+                <div>
+                  <div className="mil-label">Name</div>
+                  <div className="text-sm mil-value">{active.name}</div>
+                </div>
+                <MetricRow label="Tick minutes" value={active.tick_minutes} />
+                <MetricRow label="Max ticks" value={active.max_ticks} />
+                <hr className="mil-divider" />
+                <div>
+                  <div className="mil-label mb-1">Defender Resources</div>
+                  <div className="text-[11px] text-dim font-mono">
+                    {Object.entries(active.defender_resources).map(([base, types]) => (
+                      <div key={base}>
+                        {base}: {Object.entries(types).map(([t, c]) => `${c} ${t}`).join(", ")}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="mil-label mb-1">Attacker Resources</div>
+                  <div className="text-[11px] text-dim font-mono">
+                    {Object.entries(active.attacker_resources).map(([base, types]) => (
+                      <div key={base}>
+                        {base}: {Object.entries(types).map(([t, c]) => `${c} ${t}`).join(", ")}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-dim text-xs">No active settings. Create one from scenario.</p>
+            )}
+          </Panel>
+        </div>
+      </main>
+    </div>
+  );
+}

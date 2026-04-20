@@ -1,128 +1,65 @@
+"""
+Movement service. Moves airborne aircraft toward their target each tick.
+Respects damage speed modifier. Fuel consumption deterministic.
+"""
+
 from __future__ import annotations
 
 from ..entities.aircraft import Aircraft, AircraftState
-from ..entities.base import Base
-from ..value_objects.decision import Decision, DecisionType
-from ..value_objects.position import Position
+from ..entities.location import Location
+from ..value_objects.event import Event, EventType
 
 
-def _find_base(bases: list[Base], base_id: str) -> Base | None:
-    for b in bases:
-        if b.id == base_id:
-            return b
-    return None
-
-
-def _find_aircraft(aircraft_list: list[Aircraft], ac_id: str) -> Aircraft | None:
-    for a in aircraft_list:
-        if a.id == ac_id:
-            return a
-    return None
-
-
-def execute_movements(
-    friendly_aircraft: list[Aircraft],
-    enemy_aircraft: list[Aircraft],
-    decisions: list[Decision],
-    friendly_bases: list[Base],
+def advance_aircraft(
+    aircraft_list: list[Aircraft],
+    friendly_bases: list[Location],
+    enemy_bases: list[Location],
     tick_minutes: float,
-) -> list[str]:
-    events: list[str] = []
-    all_aircraft = {a.id: a for a in friendly_aircraft + enemy_aircraft}
+    tick: int,
+) -> list[Event]:
+    """
+    Move each airborne aircraft toward its target_position. Burn fuel. Detect
+    arrival at base (RTB complete) and transition to MAINTENANCE.
+    Detect fuel exhaustion -> DESTROYED.
+    """
+    events: list[Event] = []
+    all_bases = friendly_bases + enemy_bases
 
-    for decision in decisions:
-        ac = _find_aircraft(friendly_aircraft, decision.aircraft_id)
-        if ac is None or not ac.is_alive:
-            continue
-
-        if decision.type == DecisionType.LAUNCH:
-            if ac.state != AircraftState.GROUNDED:
-                continue
-            base = _find_base(friendly_bases, ac.assigned_base)
-            if base and ac.id in base.current_aircraft:
-                base.current_aircraft.remove(ac.id)
-            ac.state = AircraftState.AIRBORNE
-            if decision.position:
-                ac.target_position = decision.position
-            elif decision.target_id:
-                target = all_aircraft.get(decision.target_id)
-                if target:
-                    ac.target_position = target.position
-            events.append(f"{ac.id} launched from {ac.assigned_base}")
-
-        elif decision.type == DecisionType.INTERCEPT:
-            if ac.state not in (AircraftState.AIRBORNE, AircraftState.GROUNDED):
-                continue
-            if ac.state == AircraftState.GROUNDED:
-                base = _find_base(friendly_bases, ac.assigned_base)
-                if base and ac.id in base.current_aircraft:
-                    base.current_aircraft.remove(ac.id)
-                ac.state = AircraftState.AIRBORNE
-                events.append(f"{ac.id} scrambled from {ac.assigned_base}")
-            ac.target_id = decision.target_id
-            target = all_aircraft.get(decision.target_id or "")
-            if target:
-                ac.target_position = target.position
-            events.append(f"{ac.id} intercepting {decision.target_id}")
-
-        elif decision.type == DecisionType.PATROL:
-            if ac.state == AircraftState.GROUNDED:
-                base = _find_base(friendly_bases, ac.assigned_base)
-                if base and ac.id in base.current_aircraft:
-                    base.current_aircraft.remove(ac.id)
-                ac.state = AircraftState.AIRBORNE
-                events.append(f"{ac.id} launched for patrol")
-            if decision.position:
-                ac.target_position = decision.position
-            ac.target_id = None
-
-        elif decision.type == DecisionType.RTB:
-            if ac.state != AircraftState.AIRBORNE:
-                continue
-            target_base_id = decision.target_id or ac.assigned_base
-            base = _find_base(friendly_bases, target_base_id)
-            if base:
-                ac.target_position = base.position
-                ac.target_id = None
-                ac.assigned_base = target_base_id
-            events.append(f"{ac.id} returning to {target_base_id}")
-
-        elif decision.type == DecisionType.RELOCATE:
-            target_base_id = decision.target_id
-            if not target_base_id:
-                continue
-            base = _find_base(friendly_bases, target_base_id)
-            if base:
-                if ac.state == AircraftState.GROUNDED:
-                    old_base = _find_base(friendly_bases, ac.assigned_base)
-                    if old_base and ac.id in old_base.current_aircraft:
-                        old_base.current_aircraft.remove(ac.id)
-                    ac.state = AircraftState.AIRBORNE
-                ac.target_position = base.position
-                ac.assigned_base = target_base_id
-            events.append(f"{ac.id} relocating to {target_base_id}")
-
-        elif decision.type == DecisionType.HOLD:
-            ac.target_position = None
-            ac.target_id = None
-
-    # Move all airborne aircraft toward their targets
-    for ac in friendly_aircraft + enemy_aircraft:
-        if ac.state != AircraftState.AIRBORNE or not ac.is_alive:
-            continue
-
-        # Update intercept targets to current enemy position
-        if ac.target_id:
-            target = all_aircraft.get(ac.target_id)
-            if target and target.is_alive:
-                ac.target_position = target.position
+    # Refresh intercept-by-id targets to the target's current position
+    by_id = {a.id: a for a in aircraft_list}
+    for ac in aircraft_list:
+        if ac.target_id and ac.target_id in by_id:
+            tgt = by_id[ac.target_id]
+            if tgt.is_alive:
+                ac.target_position = tgt.position
             else:
                 ac.target_id = None
 
-        if ac.target_position is None:
+    for ac in aircraft_list:
+        if ac.state not in (AircraftState.AIRBORNE, AircraftState.DAMAGED, AircraftState.ENGAGED):
+            continue
+        if not ac.is_alive:
             continue
 
-        distance_this_tick = ac.speed_kmh * (tick_minutes / 60.0)
+        if ac.target_position is None:
+            # Loiter: no forward motion; pilot still burns fuel
+            ac.fuel_current -= ac.fuel_burn_rate * 5.0  # small idle burn
+            if ac.fuel_current <= 0:
+                ac.fuel_current = 0
+                ac.state = AircraftState.DESTROYED
+                events.append(Event(
+                    type=EventType.AIRCRAFT_DESTROYED,
+                    tick=tick,
+                    payload={
+                        "aircraft_id": ac.id,
+                        "cause": "fuel_exhausted_loitering",
+                        "side": ac.side.value,
+                    },
+                ))
+            continue
+
+        effective_speed = ac.effective_speed_kmh
+        distance_this_tick = effective_speed * (tick_minutes / 60.0)
         distance_to_target = ac.position.distance_to(ac.target_position)
         actual_distance = min(distance_this_tick, distance_to_target)
 
@@ -132,24 +69,71 @@ def execute_movements(
         if ac.fuel_current <= 0:
             ac.fuel_current = 0
             ac.state = AircraftState.DESTROYED
-            events.append(f"{ac.id} crashed — fuel exhausted")
+            events.append(Event(
+                type=EventType.AIRCRAFT_DESTROYED,
+                tick=tick,
+                payload={
+                    "aircraft_id": ac.id,
+                    "cause": "fuel_exhausted",
+                    "side": ac.side.value,
+                },
+            ))
             continue
 
-        # Check arrival at base (RTB / RELOCATE)
-        if distance_to_target <= 5.0:
-            base = _find_base(
-                friendly_bases if ac.side.value == friendly_bases[0].side.value else [],
-                ac.assigned_base,
-            )
-            if base and ac.position.distance_to(base.position) <= 5.0:
-                if len(base.current_aircraft) < base.max_aircraft_capacity:
-                    ac.state = AircraftState.MAINTENANCE
-                    ac.service_ticks_remaining = max(
-                        1, int(ac.maintenance_time_minutes / tick_minutes)
-                    )
+        # Arrival detection: if we reached target and target is a friendly base,
+        # land (transition to MAINTENANCE for service)
+        if actual_distance >= distance_to_target - 0.01:
+            base = _landing_base(ac, all_bases)
+            if base and base.is_operational and base.available_capacity > 0:
+                # Land
+                ac.state = (
+                    AircraftState.REPAIRING if ac.damage_level.value in ("moderate", "heavy")
+                    else AircraftState.MAINTENANCE
+                )
+                ac.service_ticks_remaining = max(
+                    1, int(ac.maintenance_time_minutes / tick_minutes)
+                )
+                if ac.id not in base.current_aircraft:
                     base.current_aircraft.append(ac.id)
-                    ac.target_position = None
-                    ac.target_id = None
-                    events.append(f"{ac.id} landed at {base.name}")
+                ac.assigned_base = base.id
+                ac.target_position = None
+                ac.target_id = None
+
+                events.append(Event(
+                    type=EventType.LANDED,
+                    tick=tick,
+                    payload={
+                        "aircraft_id": ac.id,
+                        "base_id": base.id,
+                        "base_name": base.name,
+                        "damage_level": ac.damage_level.value,
+                    },
+                ))
 
     return events
+
+
+def _landing_base(ac: Aircraft, all_bases: list[Location]) -> Location | None:
+    """Find a friendly base the aircraft is currently AT, preferring assigned_base."""
+    own_side_bases = [b for b in all_bases if b.side == ac.side]
+    if not own_side_bases:
+        return None
+
+    # Within landing range of current position?
+    LANDING_RANGE_KM = 5.0
+    candidates = [
+        b for b in own_side_bases
+        if b.position.distance_to(ac.position) < LANDING_RANGE_KM
+    ]
+    if not candidates:
+        return None
+
+    # Prefer assigned_base if operational and in range
+    for b in candidates:
+        if b.id == ac.assigned_base and b.is_operational and b.available_capacity > 0:
+            return b
+    # Else nearest operational with capacity (landing redirect reflex)
+    operational = [b for b in candidates if b.is_operational and b.available_capacity > 0]
+    if not operational:
+        return None
+    return min(operational, key=lambda b: b.position.distance_to(ac.position))

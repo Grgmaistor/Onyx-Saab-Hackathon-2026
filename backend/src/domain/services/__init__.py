@@ -1,19 +1,33 @@
 from __future__ import annotations
 
-from .combat_resolver import resolve_engagements
-from .movement import execute_movements
-from .fuel_manager import service_aircraft
+from .attack_plan_executor import execute_attack_plan
 from .detection import detect_threats
-from .damage import apply_city_damage
-from .metrics import compute_metrics
+from .engagement_engine import resolve_engagements
+from .fitness import compute_fitness
+from .movement import advance_aircraft
+from .pattern_extractor import extract_pattern
+from .pilot_reflexes import ReflexAction, ReflexKind, evaluate_reflexes, evaluate_reflexes_bulk
+from .playbook_executor import Command, ExecutorState, execute_playbook
+from .service_manager import kill_parked_aircraft, service_aircraft
 from .simulation_engine import run_simulation
+from .strike_resolver import resolve_strikes
 
 __all__ = [
-    "resolve_engagements",
-    "execute_movements",
-    "service_aircraft",
+    "execute_attack_plan",
     "detect_threats",
-    "apply_city_damage",
-    "compute_metrics",
+    "resolve_engagements",
+    "compute_fitness",
+    "advance_aircraft",
+    "extract_pattern",
+    "ReflexAction",
+    "ReflexKind",
+    "evaluate_reflexes",
+    "evaluate_reflexes_bulk",
+    "Command",
+    "ExecutorState",
+    "execute_playbook",
+    "kill_parked_aircraft",
+    "service_aircraft",
     "run_simulation",
+    "resolve_strikes",
 ]

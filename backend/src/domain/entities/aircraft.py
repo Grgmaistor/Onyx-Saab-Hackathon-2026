@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from ..value_objects.damage_model import AIRCRAFT_WEAPON_TYPE, WeaponType
+from ..value_objects.engagement_result import DamageLevel
 from ..value_objects.position import Position
 
 
@@ -25,61 +27,93 @@ class AircraftState(str, Enum):
     REARMING = "rearming"
     MAINTENANCE = "maintenance"
     ENGAGED = "engaged"
+    DAMAGED = "damaged"          # airborne but combat-reduced
+    REPAIRING = "repairing"      # at base, battle damage repair
     DESTROYED = "destroyed"
 
 
+# Research-backed defaults (see research/aircraft_performance.md)
 AIRCRAFT_SPECS: dict[AircraftType, dict] = {
     AircraftType.DRONE_SWARM: {
-        "speed_kmh": 150,
-        "fuel_capacity": 100,
-        "fuel_burn_rate": 0.8,
-        "refuel_time_minutes": 30,
-        "ammo_capacity": 20,
-        "rearm_time_minutes": 20,
-        "maintenance_time_minutes": 15,
+        "speed_kmh": 180,
+        "fuel_capacity": 200,
+        "fuel_burn_rate": 1.0,
+        "refuel_time_minutes": 60,
+        "ammo_capacity": 15,
+        "rearm_time_minutes": 30,
+        "maintenance_time_minutes": 20,
         "combat_matchups": {
-            "drone_swarm": 0.50, "uav": 0.55,
-            "combat_plane": 0.20, "bomber": 0.65,
+            "drone_swarm": 0.50, "uav": 0.60,
+            "combat_plane": 0.15, "bomber": 0.70,
         },
     },
     AircraftType.UAV: {
-        "speed_kmh": 250,
-        "fuel_capacity": 300,
-        "fuel_burn_rate": 0.5,
-        "refuel_time_minutes": 45,
+        "speed_kmh": 300,
+        "fuel_capacity": 1500,
+        "fuel_burn_rate": 0.20,
+        "refuel_time_minutes": 30,
         "ammo_capacity": 4,
-        "rearm_time_minutes": 30,
-        "maintenance_time_minutes": 30,
+        "rearm_time_minutes": 20,
+        "maintenance_time_minutes": 45,
         "combat_matchups": {
-            "drone_swarm": 0.45, "uav": 0.50,
-            "combat_plane": 0.25, "bomber": 0.60,
+            "drone_swarm": 0.40, "uav": 0.50,
+            "combat_plane": 0.10, "bomber": 0.55,
         },
     },
     AircraftType.COMBAT_PLANE: {
-        "speed_kmh": 900,
-        "fuel_capacity": 800,
-        "fuel_burn_rate": 1.2,
-        "refuel_time_minutes": 60,
+        "speed_kmh": 950,
+        "fuel_capacity": 3400,
+        "fuel_burn_rate": 1.26,
+        "refuel_time_minutes": 10,
         "ammo_capacity": 6,
-        "rearm_time_minutes": 40,
-        "maintenance_time_minutes": 45,
+        "rearm_time_minutes": 15,
+        "maintenance_time_minutes": 30,
         "combat_matchups": {
-            "drone_swarm": 0.80, "uav": 0.75,
-            "combat_plane": 0.50, "bomber": 0.70,
+            "drone_swarm": 0.85, "uav": 0.90,
+            "combat_plane": 0.50, "bomber": 0.75,
         },
     },
     AircraftType.BOMBER: {
-        "speed_kmh": 600,
-        "fuel_capacity": 1200,
-        "fuel_burn_rate": 2.0,
-        "refuel_time_minutes": 90,
-        "ammo_capacity": 12,
-        "rearm_time_minutes": 60,
+        "speed_kmh": 750,
+        "fuel_capacity": 9000,
+        "fuel_burn_rate": 3.73,
+        "refuel_time_minutes": 30,
+        "ammo_capacity": 8,
+        "rearm_time_minutes": 45,
         "maintenance_time_minutes": 60,
         "combat_matchups": {
-            "drone_swarm": 0.35, "uav": 0.40,
-            "combat_plane": 0.30, "bomber": 0.50,
+            "drone_swarm": 0.30, "uav": 0.45,
+            "combat_plane": 0.25, "bomber": 0.50,
         },
+    },
+}
+
+
+# Per-type pilot reflex parameters (see Development/Architecture/PILOT_REFLEXES.md)
+REFLEX_PARAMS: dict[AircraftType, dict] = {
+    AircraftType.COMBAT_PLANE: {
+        "bingo_fuel_threshold": 0.18,
+        "abort_p_success_threshold": 0.25,
+        "bugout_ratio": 2.0,
+        "abort_action": "DISENGAGE_RTB",
+    },
+    AircraftType.BOMBER: {
+        "bingo_fuel_threshold": 0.22,
+        "abort_p_success_threshold": 0.40,
+        "bugout_ratio": 1.2,
+        "abort_action": "JETTISON_WEAPONS_RTB",
+    },
+    AircraftType.UAV: {
+        "bingo_fuel_threshold": 0.15,
+        "abort_p_success_threshold": 0.35,
+        "bugout_ratio": 1.5,
+        "abort_action": "RTB",
+    },
+    AircraftType.DRONE_SWARM: {
+        "bingo_fuel_threshold": 0.10,
+        "abort_p_success_threshold": 0.15,
+        "bugout_ratio": 1.0,
+        "abort_action": "CONTINUE",
     },
 }
 
@@ -102,23 +136,58 @@ class Aircraft:
     maintenance_time_minutes: float
     combat_matchups: dict[str, float]
     assigned_base: str
+
+    # Runtime state
     service_ticks_remaining: int = 0
     target_position: Position | None = None
     target_id: str | None = None
 
+    # Damage tracking
+    damage_level: DamageLevel = DamageLevel.NONE
+    speed_modifier: float = 1.0       # effective speed = speed_kmh * speed_modifier
+
+    # Per-action abort threshold override (set by attack plan action)
+    abort_threshold_override: float | None = None
+
+    # What this aircraft's primary weapon is (for strike resolution)
+    @property
+    def primary_weapon(self) -> WeaponType:
+        return AIRCRAFT_WEAPON_TYPE.get(self.type.value, WeaponType.MISSILES)
+
+    @property
+    def reflex_params(self) -> dict:
+        return REFLEX_PARAMS[self.type]
+
     @property
     def is_available(self) -> bool:
-        return self.state in (AircraftState.GROUNDED, AircraftState.AIRBORNE)
+        return self.state in (
+            AircraftState.GROUNDED,
+            AircraftState.AIRBORNE,
+            AircraftState.DAMAGED,
+        )
 
     @property
     def is_alive(self) -> bool:
         return self.state != AircraftState.DESTROYED
 
     @property
+    def is_airborne(self) -> bool:
+        return self.state in (AircraftState.AIRBORNE, AircraftState.DAMAGED, AircraftState.ENGAGED)
+
+    @property
     def fuel_fraction(self) -> float:
         if self.fuel_capacity <= 0:
             return 0.0
         return self.fuel_current / self.fuel_capacity
+
+    @property
+    def effective_speed_kmh(self) -> float:
+        return self.speed_kmh * self.speed_modifier
+
+    def abort_threshold(self) -> float:
+        if self.abort_threshold_override is not None:
+            return self.abort_threshold_override
+        return self.reflex_params["abort_p_success_threshold"]
 
     def to_dict(self) -> dict:
         return {
@@ -129,6 +198,8 @@ class Aircraft:
             "state": self.state.value,
             "fuel": round(self.fuel_fraction, 2),
             "ammo": self.ammo_current,
+            "damage_level": self.damage_level.value,
+            "speed_modifier": round(self.speed_modifier, 2),
         }
 
 

@@ -1,31 +1,23 @@
 from __future__ import annotations
 
-from .aircraft import Aircraft, AircraftType, AircraftState, Side, create_aircraft
-from .base import Base
-from .city import City
-from .battle import Battle
+from .aircraft import Aircraft, AircraftState, AircraftType, Side, create_aircraft
+from .location import Location
 from .simulation import (
-    SimulationStatus,
-    SimulationOutcome,
-    SimulationState,
-    SimulationTick,
     SimulationConfig,
-    SimulationResult,
+    SimulationState,
+    SimulationStatus,
+    SimulationTick,
 )
 
 __all__ = [
     "Aircraft",
-    "AircraftType",
     "AircraftState",
+    "AircraftType",
     "Side",
     "create_aircraft",
-    "Base",
-    "City",
-    "Battle",
-    "SimulationStatus",
-    "SimulationOutcome",
-    "SimulationState",
-    "SimulationTick",
+    "Location",
     "SimulationConfig",
-    "SimulationResult",
+    "SimulationState",
+    "SimulationStatus",
+    "SimulationTick",
 ]
