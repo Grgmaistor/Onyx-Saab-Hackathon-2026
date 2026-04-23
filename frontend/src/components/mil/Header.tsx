@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import {  useState } from "react";
 import { usePathname } from "next/navigation";
 
 const NAV = [
@@ -13,7 +14,9 @@ const NAV = [
 
 export function Header() {
   const pathname = usePathname();
-  const now = new Date();
+  const [time,setTime] = useState(new Date().toISOString());
+
+  setInterval(()=>{setTime(new Date().toISOString()  )},1000)
 
   return (
     <header className="border-b border-mil-bright bg-surface-0">
@@ -28,7 +31,7 @@ export function Header() {
         <div className="flex items-center gap-4 text-xs">
           <span className="text-dim">CLASSIFIED // HACKATHON-USE</span>
           <span className="text-accent mil-glow">
-            {now.toISOString().split(".")[0].replace("T", " ")}Z
+            {time.split(".")[0].replace("T", " ")}Z
           </span>
         </div>
       </div>
